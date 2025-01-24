@@ -1,5 +1,69 @@
 # @ai-sdk/ui-utils
 
+## 1.1.3
+
+### Patch Changes
+
+- 9ce598c: feat (ai/ui): add reasoning support to useChat
+
+## 1.1.2
+
+### Patch Changes
+
+- Updated dependencies [ed012d2]
+- Updated dependencies [3a58a2e]
+  - @ai-sdk/provider-utils@2.1.2
+  - @ai-sdk/provider@1.0.6
+
+## 1.1.1
+
+### Patch Changes
+
+- e7a9ec9: feat (provider-utils): include raw value in json parse results
+- 0a699f1: feat: add reasoning token support
+- Updated dependencies [e7a9ec9]
+- Updated dependencies [0a699f1]
+  - @ai-sdk/provider-utils@2.1.1
+  - @ai-sdk/provider@1.0.5
+
+## 1.1.0
+
+### Minor Changes
+
+- 62ba5ad: release: AI SDK 4.1
+
+### Patch Changes
+
+- Updated dependencies [62ba5ad]
+  - @ai-sdk/provider-utils@2.1.0
+
+## 1.0.12
+
+### Patch Changes
+
+- 33592d2: fix (ai/core): switch to json schema 7 target for zod to json schema conversion
+
+## 1.0.11
+
+### Patch Changes
+
+- 00114c5: feat (ui): generate and forward message ids for response messages
+- Updated dependencies [00114c5]
+  - @ai-sdk/provider-utils@2.0.8
+
+## 1.0.10
+
+### Patch Changes
+
+- 37f4510: feat (ui): expose useChat id and send it to the server
+
+## 1.0.9
+
+### Patch Changes
+
+- 2495973: feat (ai/core): use openai compatible mode for json schema conversion
+- 2495973: fix (ai/core): duplicate instead of using reference in json schema
+
 ## 1.0.8
 
 ### Patch Changes

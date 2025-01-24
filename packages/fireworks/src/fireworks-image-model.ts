@@ -10,17 +10,10 @@ import {
   postJsonToApi,
   ResponseHandler,
 } from '@ai-sdk/provider-utils';
-
-// https://fireworks.ai/models?type=image
-export type FireworksImageModelId =
-  | 'accounts/fireworks/models/flux-1-dev-fp8'
-  | 'accounts/fireworks/models/flux-1-schnell-fp8'
-  | 'accounts/fireworks/models/playground-v2-5-1024px-aesthetic'
-  | 'accounts/fireworks/models/japanese-stable-diffusion-xl'
-  | 'accounts/fireworks/models/playground-v2-1024px-aesthetic'
-  | 'accounts/fireworks/models/SSD-1B'
-  | 'accounts/fireworks/models/stable-diffusion-xl-1024-v1-0'
-  | (string & {});
+import {
+  FireworksImageModelId,
+  FireworksImageSettings,
+} from './fireworks-image-settings';
 
 interface FireworksImageModelBackendConfig {
   urlFormat: 'workflows' | 'image_generation';
@@ -76,6 +69,9 @@ interface FireworksImageModelConfig {
   baseURL: string;
   headers: () => Record<string, string>;
   fetch?: FetchFunction;
+  _internal?: {
+    currentDate?: () => Date;
+  };
 }
 
 const createBinaryResponseHandler =
@@ -134,42 +130,6 @@ const statusCodeErrorResponseHandler: ResponseHandler<APICallError> = async ({
   };
 };
 
-interface ImageRequestParams {
-  baseUrl: string;
-  modelId: FireworksImageModelId;
-  prompt: string;
-  aspectRatio?: string;
-  size?: string;
-  seed?: number;
-  providerOptions: Record<string, unknown>;
-  headers: Record<string, string | undefined>;
-  abortSignal?: AbortSignal;
-  fetch?: FetchFunction;
-}
-
-async function postImageToApi(
-  params: ImageRequestParams,
-): Promise<ArrayBuffer> {
-  const splitSize = params.size?.split('x');
-  const { value: response } = await postJsonToApi({
-    url: getUrlForModel(params.baseUrl, params.modelId),
-    headers: params.headers,
-    body: {
-      prompt: params.prompt,
-      aspect_ratio: params.aspectRatio,
-      seed: params.seed,
-      ...(splitSize && { width: splitSize[0], height: splitSize[1] }),
-      ...(params.providerOptions.fireworks ?? {}),
-    },
-    failedResponseHandler: statusCodeErrorResponseHandler,
-    successfulResponseHandler: createBinaryResponseHandler(),
-    abortSignal: params.abortSignal,
-    fetch: params.fetch,
-  });
-
-  return response;
-}
-
 export class FireworksImageModel implements ImageModelV1 {
   readonly specificationVersion = 'v1';
 
@@ -177,10 +137,13 @@ export class FireworksImageModel implements ImageModelV1 {
     return this.config.provider;
   }
 
-  readonly maxImagesPerCall = 1;
+  get maxImagesPerCall(): number {
+    return this.settings.maxImagesPerCall ?? 1;
+  }
 
   constructor(
     readonly modelId: FireworksImageModelId,
+    readonly settings: FireworksImageSettings,
     private config: FireworksImageModelConfig,
   ) {}
 
@@ -218,19 +181,33 @@ export class FireworksImageModel implements ImageModelV1 {
       });
     }
 
-    const response = await postImageToApi({
-      baseUrl: this.config.baseURL,
-      prompt,
-      aspectRatio,
-      size,
-      seed,
-      modelId: this.modelId,
-      providerOptions,
+    const splitSize = size?.split('x');
+    const currentDate = this.config._internal?.currentDate?.() ?? new Date();
+    const { value: response, responseHeaders } = await postJsonToApi({
+      url: getUrlForModel(this.config.baseURL, this.modelId),
       headers: combineHeaders(this.config.headers(), headers),
+      body: {
+        prompt,
+        aspect_ratio: aspectRatio,
+        seed,
+        samples: n,
+        ...(splitSize && { width: splitSize[0], height: splitSize[1] }),
+        ...(providerOptions.fireworks ?? {}),
+      },
+      failedResponseHandler: statusCodeErrorResponseHandler,
+      successfulResponseHandler: createBinaryResponseHandler(),
       abortSignal,
       fetch: this.config.fetch,
     });
 
-    return { images: [new Uint8Array(response)], warnings };
+    return {
+      images: [new Uint8Array(response)],
+      warnings,
+      response: {
+        timestamp: currentDate,
+        modelId: this.modelId,
+        headers: responseHeaders,
+      },
+    };
   }
 }

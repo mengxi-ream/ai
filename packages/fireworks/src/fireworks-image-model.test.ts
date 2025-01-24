@@ -2,27 +2,40 @@ import { FetchFunction } from '@ai-sdk/provider-utils';
 import { createTestServer } from '@ai-sdk/provider-utils/test';
 import { describe, expect, it } from 'vitest';
 import { FireworksImageModel } from './fireworks-image-model';
+import { FireworksImageSettings } from './fireworks-image-settings';
 
 const prompt = 'A cute baby sea otter';
 
 function createBasicModel({
   headers,
   fetch,
+  currentDate,
+  settings,
 }: {
   headers?: () => Record<string, string>;
   fetch?: FetchFunction;
+  currentDate?: () => Date;
+  settings?: FireworksImageSettings;
 } = {}) {
-  return new FireworksImageModel('accounts/fireworks/models/flux-1-dev-fp8', {
-    provider: 'fireworks',
-    baseURL: 'https://api.example.com',
-    headers: headers ?? (() => ({ 'api-key': 'test-key' })),
-    fetch,
-  });
+  return new FireworksImageModel(
+    'accounts/fireworks/models/flux-1-dev-fp8',
+    settings ?? {},
+    {
+      provider: 'fireworks',
+      baseURL: 'https://api.example.com',
+      headers: headers ?? (() => ({ 'api-key': 'test-key' })),
+      fetch,
+      _internal: {
+        currentDate,
+      },
+    },
+  );
 }
 
 function createSizeModel() {
   return new FireworksImageModel(
     'accounts/fireworks/models/playground-v2-5-1024px-aesthetic',
+    {},
     {
       provider: 'fireworks',
       baseURL: 'https://api.size-example.com',
@@ -64,6 +77,7 @@ describe('FireworksImageModel', () => {
         prompt,
         aspect_ratio: '16:9',
         seed: 42,
+        samples: 1,
         additional_param: 'value',
       });
     });
@@ -182,6 +196,7 @@ describe('FireworksImageModel', () => {
         width: '1024',
         height: '768',
         seed: 42,
+        samples: 1,
       });
     });
 
@@ -269,6 +284,73 @@ describe('FireworksImageModel', () => {
 
       expect(mockFetch).toHaveBeenCalled();
     });
+
+    it('should pass samples parameter to API', async () => {
+      const model = createBasicModel();
+
+      await model.doGenerate({
+        prompt,
+        n: 42,
+        size: undefined,
+        aspectRatio: undefined,
+        seed: undefined,
+        providerOptions: {},
+      });
+
+      const requestBody = await server.calls[0].requestBody;
+      expect(requestBody).toHaveProperty('samples', 42);
+    });
+
+    describe('response metadata', () => {
+      it('should include timestamp, headers and modelId in response', async () => {
+        const testDate = new Date('2024-01-01T00:00:00Z');
+        const model = createBasicModel({
+          currentDate: () => testDate,
+        });
+
+        const result = await model.doGenerate({
+          prompt,
+          n: 1,
+          size: undefined,
+          aspectRatio: undefined,
+          seed: undefined,
+          providerOptions: {},
+        });
+
+        expect(result.response).toStrictEqual({
+          timestamp: testDate,
+          modelId: 'accounts/fireworks/models/flux-1-dev-fp8',
+          headers: expect.any(Object),
+        });
+      });
+
+      it('should include response headers from API call', async () => {
+        server.urls['https://api.example.com/*'].response = {
+          type: 'binary',
+          body: Buffer.from('test-binary-content'),
+          headers: {
+            'x-request-id': 'test-request-id',
+            'content-type': 'image/png',
+          },
+        };
+
+        const model = createBasicModel();
+        const result = await model.doGenerate({
+          prompt,
+          n: 1,
+          size: undefined,
+          aspectRatio: undefined,
+          seed: undefined,
+          providerOptions: {},
+        });
+
+        expect(result.response.headers).toStrictEqual({
+          'content-length': '19',
+          'x-request-id': 'test-request-id',
+          'content-type': 'image/png',
+        });
+      });
+    });
   });
 
   describe('constructor', () => {
@@ -278,6 +360,22 @@ describe('FireworksImageModel', () => {
       expect(model.provider).toBe('fireworks');
       expect(model.modelId).toBe('accounts/fireworks/models/flux-1-dev-fp8');
       expect(model.specificationVersion).toBe('v1');
+      expect(model.maxImagesPerCall).toBe(1);
+    });
+
+    it('should use maxImagesPerCall from settings', () => {
+      const model = createBasicModel({
+        settings: {
+          maxImagesPerCall: 4,
+        },
+      });
+
+      expect(model.maxImagesPerCall).toBe(4);
+    });
+
+    it('should default maxImagesPerCall to 1 when not specified', () => {
+      const model = createBasicModel();
+
       expect(model.maxImagesPerCall).toBe(1);
     });
   });

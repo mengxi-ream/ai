@@ -19,15 +19,13 @@ interface ReplicateImageModelConfig {
   baseURL: string;
   headers?: Resolvable<Record<string, string | undefined>>;
   fetch?: FetchFunction;
+  _internal?: {
+    currentDate?: () => Date;
+  };
 }
 
 export class ReplicateImageModel implements ImageModelV1 {
   readonly specificationVersion = 'v1';
-
-  readonly modelId: ReplicateImageModelId;
-  readonly settings: ReplicateImageSettings;
-
-  private readonly config: ReplicateImageModelConfig;
 
   get provider(): string {
     return this.config.provider;
@@ -38,14 +36,10 @@ export class ReplicateImageModel implements ImageModelV1 {
   }
 
   constructor(
-    modelId: ReplicateImageModelId,
-    settings: ReplicateImageSettings,
-    config: ReplicateImageModelConfig,
-  ) {
-    this.modelId = modelId;
-    this.settings = settings;
-    this.config = config;
-  }
+    readonly modelId: ReplicateImageModelId,
+    private readonly settings: ReplicateImageSettings,
+    private readonly config: ReplicateImageModelConfig,
+  ) {}
 
   async doGenerate({
     prompt,
@@ -61,8 +55,10 @@ export class ReplicateImageModel implements ImageModelV1 {
   > {
     const warnings: Array<ImageModelV1CallWarning> = [];
 
+    const currentDate = this.config._internal?.currentDate?.() ?? new Date();
     const {
       value: { output },
+      responseHeaders,
     } = await postJsonToApi({
       url: `${this.config.baseURL}/models/${this.modelId}/predictions`,
       headers: combineHeaders(await resolve(this.config.headers), headers, {
@@ -95,7 +91,15 @@ export class ReplicateImageModel implements ImageModelV1 {
       }),
     );
 
-    return { images, warnings };
+    return {
+      images,
+      warnings,
+      response: {
+        timestamp: currentDate,
+        modelId: this.modelId,
+        headers: responseHeaders,
+      },
+    };
   }
 }
 

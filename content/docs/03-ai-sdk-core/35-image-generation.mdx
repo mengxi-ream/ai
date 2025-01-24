@@ -83,6 +83,22 @@ const { images } = await generateImage({
   parallel) to generate the requested number of images.
 </Note>
 
+Each image model has an internal limit on how many images it can generate in a single API call. The AI SDK manages this automatically by batching requests appropriately when you request multiple images using the `n` parameter. By default, the SDK uses provider-documented limits (for example, DALL-E 3 can only generate 1 image per call, while DALL-E 2 supports up to 10).
+
+If needed, you can override this behavior using the `maxImagesPerCall` setting when configuring your model. This is particularly useful when working with new or custom models where the default batch size might not be optimal:
+
+```tsx
+const model = openai.image('dall-e-2', {
+  maxImagesPerCall: 5, // Override the default batch size
+});
+
+const { images } = await generateImage({
+  model,
+  prompt: 'Santa Claus driving a Cadillac',
+  n: 10, // Will make 2 calls of 5 images each
+});
+```
+
 ### Providing a Seed
 
 You can provide a seed to the `generateImage` function to control the output of the image generation process.
@@ -162,6 +178,34 @@ const { image, warnings } = await generateImage({
   model: openai.image('dall-e-3'),
   prompt: 'Santa Claus driving a Cadillac',
 });
+```
+
+### Error Handling
+
+When `generateImage` cannot generate a valid image, it throws a [`AI_NoImageGeneratedError`](/docs/reference/ai-sdk-errors/ai-no-image-generated-error).
+
+This error occurs when the AI provider fails to generate an image. It can arise due to the following reasons:
+
+- The model failed to generate a response
+- The model generated a response that could not be parsed
+
+The error preserves the following information to help you log the issue:
+
+- `responses`: Metadata about the image model responses, including timestamp, model, and headers.
+- `cause`: The cause of the error. You can use this for more detailed error handling
+
+```ts
+import { generateImage, NoImageGeneratedError } from 'ai';
+
+try {
+  await generateImage({ model, prompt });
+} catch (error) {
+  if (NoImageGeneratedError.isInstance(error)) {
+    console.log('NoImageGeneratedError');
+    console.log('Cause:', error.cause);
+    console.log('Responses:', error.responses);
+  }
+}
 ```
 
 ## Image Models
