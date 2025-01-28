@@ -1,15 +1,16 @@
-import { createIdGenerator } from '@ai-sdk/provider-utils';
+import { createIdGenerator, IDGenerator } from '@ai-sdk/provider-utils';
 import { DataStreamString, formatDataStreamPart } from '@ai-sdk/ui-utils';
 import { Span } from '@opentelemetry/api';
 import { ServerResponse } from 'node:http';
 import { InvalidArgumentError } from '../../errors/invalid-argument-error';
 import { NoOutputSpecifiedError } from '../../errors/no-output-specified-error';
 import { StreamData } from '../../streams/stream-data';
+import { asArray } from '../../util/as-array';
 import { DelayedPromise } from '../../util/delayed-promise';
 import { DataStreamWriter } from '../data-stream/data-stream-writer';
 import { CallSettings } from '../prompt/call-settings';
 import { convertToLanguageModelPrompt } from '../prompt/convert-to-language-model-prompt';
-import { CoreAssistantMessage, CoreToolMessage } from '../prompt/message';
+import { CoreAssistantMessage } from '../prompt/message';
 import { prepareCallSettings } from '../prompt/prepare-call-settings';
 import { prepareRetries } from '../prompt/prepare-retries';
 import { prepareToolsAndToolChoice } from '../prompt/prepare-tools-and-tool-choice';
@@ -21,12 +22,11 @@ import { getTracer } from '../telemetry/get-tracer';
 import { recordSpan } from '../telemetry/record-span';
 import { selectTelemetryAttributes } from '../telemetry/select-telemetry-attributes';
 import { TelemetrySettings } from '../telemetry/telemetry-settings';
-import { CoreTool } from '../tool';
 import {
-  CoreToolChoice,
   FinishReason,
   LanguageModel,
   LogProbs,
+  ToolChoice,
 } from '../types/language-model';
 import { LanguageModelResponseMetadata } from '../types/language-model-response-metadata';
 import { ProviderMetadata } from '../types/provider-metadata';
@@ -47,14 +47,34 @@ import {
   runToolsTransformation,
   SingleRequestTextStreamPart,
 } from './run-tools-transformation';
-import { StepResult } from './step-result';
+import { ResponseMessage, StepResult } from './step-result';
 import { StreamTextResult, TextStreamPart } from './stream-text-result';
 import { toResponseMessages } from './to-response-messages';
 import { ToolCallUnion } from './tool-call';
 import { ToolCallRepairFunction } from './tool-call-repair';
 import { ToolResultUnion } from './tool-result';
+import { ToolSet } from './tool-set';
 
-const originalGenerateId = createIdGenerator({ prefix: 'aitxt', size: 24 });
+const originalGenerateId = createIdGenerator({
+  prefix: 'aitxt',
+  size: 24,
+});
+
+const originalGenerateMessageId = createIdGenerator({
+  prefix: 'msg',
+  size: 24,
+});
+
+/**
+A transformation that is applied to the stream.
+
+@param stopStream - A function that stops the source stream.
+@param tools - The tools that are accessible to and can be called by the model. The model needs to support calling tools.
+ */
+export type StreamTextTransform<TOOLS extends ToolSet> = (options: {
+  tools: TOOLS; // for type inference
+  stopStream: () => void;
+}) => TransformStream<TextStreamPart<TOOLS>, TextStreamPart<TOOLS>>;
 
 /**
 Generate a text and call tools for a given prompt using a language model.
@@ -94,6 +114,7 @@ If set and supported by the model, calls will generate deterministic results.
 @param headers - Additional HTTP headers to be sent with the request. Only applicable for HTTP-based providers.
 
 @param maxSteps - Maximum number of sequential LLM calls (steps), e.g. when you use tool calls.
+@param experimental_generateMessageId - Generate a unique ID for each message.
 
 @param onChunk - Callback that is called for each chunk of the stream. The stream processing will pause until the callback promise is resolved.
 @param onStepFinish - Callback that is called when each step (LLM call) is finished, including intermediate steps.
@@ -104,7 +125,7 @@ If set and supported by the model, calls will generate deterministic results.
 A result object for accessing different stream types and additional information.
  */
 export function streamText<
-  TOOLS extends Record<string, CoreTool>,
+  TOOLS extends ToolSet,
   OUTPUT = never,
   PARTIAL_OUTPUT = never,
 >({
@@ -118,11 +139,13 @@ export function streamText<
   abortSignal,
   headers,
   maxSteps = 1,
+  experimental_generateMessageId: generateMessageId = originalGenerateMessageId,
   experimental_output: output,
   experimental_continueSteps: continueSteps = false,
   experimental_telemetry: telemetry,
   experimental_providerMetadata: providerMetadata,
-  experimental_toolCallStreaming: toolCallStreaming = false,
+  experimental_toolCallStreaming = false,
+  toolCallStreaming = experimental_toolCallStreaming,
   experimental_activeTools: activeTools,
   experimental_repairToolCall: repairToolCall,
   experimental_transform: transform,
@@ -150,7 +173,7 @@ The tools that the model can call. The model needs to support calling tools.
     /**
 The tool choice strategy. Default: 'auto'.
      */
-    toolChoice?: CoreToolChoice<TOOLS>;
+    toolChoice?: ToolChoice<TOOLS>;
 
     /**
 Maximum number of sequential LLM calls (steps), e.g. when you use tool calls. Must be at least 1.
@@ -160,6 +183,11 @@ A maximum number is required to prevent infinite loops in the case of misconfigu
 By default, it's set to 1, which means that only a single LLM call is made.
  */
     maxSteps?: number;
+
+    /**
+Generate a unique ID for each message.
+     */
+    experimental_generateMessageId?: IDGenerator;
 
     /**
 When enabled, the model will perform additional steps if the finish reason is "length" (experimental).
@@ -199,18 +227,21 @@ A function that attempts to repair a tool call that failed to parse.
     /**
 Enable streaming of tool call deltas as they are generated. Disabled by default.
      */
+    toolCallStreaming?: boolean;
+
+    /**
+@deprecated Use `toolCallStreaming` instead.
+     */
     experimental_toolCallStreaming?: boolean;
 
     /**
-Optional transformation that is applied to the stream.
-
-@param stopStream - A function that stops the source stream.
-@param tools - The tools that are accessible to and can be called by the model. The model needs to support calling tools.
+Optional stream transformations.
+They are applied in the order they are provided.
+The stream transformations must maintain the stream structure for streamText to work correctly.
      */
-    experimental_transform?: (options: {
-      tools: TOOLS; // for type inference
-      stopStream: () => void;
-    }) => TransformStream<TextStreamPart<TOOLS>, TextStreamPart<TOOLS>>;
+    experimental_transform?:
+      | StreamTextTransform<TOOLS>
+      | Array<StreamTextTransform<TOOLS>>;
 
     /**
 Callback that is called for each chunk of the stream. The stream processing will pause until the callback promise is resolved.
@@ -221,6 +252,7 @@ Callback that is called for each chunk of the stream. The stream processing will
         {
           type:
             | 'text-delta'
+            | 'reasoning'
             | 'tool-call'
             | 'tool-call-streaming-start'
             | 'tool-call-delta'
@@ -245,16 +277,16 @@ Details for all steps.
     ) => Promise<void> | void;
 
     /**
-    Callback that is called when each step (LLM call) is finished, including intermediate steps.
+Callback that is called when each step (LLM call) is finished, including intermediate steps.
     */
     onStepFinish?: (event: StepResult<TOOLS>) => Promise<void> | void;
 
     /**
-     * Internal. For test use only. May change without notice.
+@internal For test use only. May change without notice.
      */
     _internal?: {
       now?: () => number;
-      generateId?: () => string;
+      generateId?: IDGenerator;
       currentDate?: () => Date;
     };
   }): StreamTextResult<TOOLS, PARTIAL_OUTPUT> {
@@ -271,7 +303,7 @@ Details for all steps.
     tools,
     toolChoice,
     toolCallStreaming,
-    transform,
+    transforms: asArray(transform),
     activeTools,
     repairToolCall,
     maxSteps,
@@ -284,19 +316,17 @@ Details for all steps.
     now,
     currentDate,
     generateId,
+    generateMessageId,
   });
 }
 
-type EnrichedStreamPart<
-  TOOLS extends Record<string, CoreTool>,
-  PARTIAL_OUTPUT,
-> = {
+type EnrichedStreamPart<TOOLS extends ToolSet, PARTIAL_OUTPUT> = {
   part: TextStreamPart<TOOLS>;
   partialOutput: PARTIAL_OUTPUT | undefined;
 };
 
 function createOutputTransformStream<
-  TOOLS extends Record<string, CoreTool>,
+  TOOLS extends ToolSet,
   OUTPUT,
   PARTIAL_OUTPUT,
 >(
@@ -372,11 +402,8 @@ function createOutputTransformStream<
   });
 }
 
-class DefaultStreamTextResult<
-  TOOLS extends Record<string, CoreTool>,
-  OUTPUT,
-  PARTIAL_OUTPUT,
-> implements StreamTextResult<TOOLS, PARTIAL_OUTPUT>
+class DefaultStreamTextResult<TOOLS extends ToolSet, OUTPUT, PARTIAL_OUTPUT>
+  implements StreamTextResult<TOOLS, PARTIAL_OUTPUT>
 {
   private readonly warningsPromise = new DelayedPromise<
     Awaited<StreamTextResult<TOOLS, PARTIAL_OUTPUT>['warnings']>
@@ -394,6 +421,9 @@ class DefaultStreamTextResult<
   >();
   private readonly textPromise = new DelayedPromise<
     Awaited<StreamTextResult<TOOLS, PARTIAL_OUTPUT>['text']>
+  >();
+  private readonly reasoningPromise = new DelayedPromise<
+    Awaited<StreamTextResult<TOOLS, PARTIAL_OUTPUT>['reasoning']>
   >();
   private readonly toolCallsPromise = new DelayedPromise<
     Awaited<StreamTextResult<TOOLS, PARTIAL_OUTPUT>['toolCalls']>
@@ -434,7 +464,7 @@ class DefaultStreamTextResult<
     tools,
     toolChoice,
     toolCallStreaming,
-    transform,
+    transforms,
     activeTools,
     repairToolCall,
     maxSteps,
@@ -447,6 +477,7 @@ class DefaultStreamTextResult<
     now,
     currentDate,
     generateId,
+    generateMessageId,
   }: {
     model: LanguageModel;
     telemetry: TelemetrySettings | undefined;
@@ -458,14 +489,9 @@ class DefaultStreamTextResult<
     prompt: Prompt['prompt'];
     messages: Prompt['messages'];
     tools: TOOLS | undefined;
-    toolChoice: CoreToolChoice<TOOLS> | undefined;
+    toolChoice: ToolChoice<TOOLS> | undefined;
     toolCallStreaming: boolean;
-    transform:
-      | ((options: {
-          tools: TOOLS; // for type inference
-          stopStream: () => void;
-        }) => TransformStream<TextStreamPart<TOOLS>, TextStreamPart<TOOLS>>)
-      | undefined;
+    transforms: Array<StreamTextTransform<TOOLS>>;
     activeTools: Array<keyof TOOLS> | undefined;
     repairToolCall: ToolCallRepairFunction<TOOLS> | undefined;
     maxSteps: number;
@@ -480,6 +506,7 @@ class DefaultStreamTextResult<
             {
               type:
                 | 'text-delta'
+                | 'reasoning'
                 | 'tool-call'
                 | 'tool-call-streaming-start'
                 | 'tool-call-delta'
@@ -500,6 +527,7 @@ class DefaultStreamTextResult<
     now: () => number;
     currentDate: () => Date;
     generateId: () => string;
+    generateMessageId: () => string;
   }) {
     if (maxSteps < 1) {
       throw new InvalidArgumentError({
@@ -517,8 +545,9 @@ class DefaultStreamTextResult<
     let recordedStepText = '';
     let recordedContinuationText = '';
     let recordedFullText = '';
+    let recordedReasoningText: string | undefined = undefined;
     const recordedResponse: LanguageModelResponseMetadata & {
-      messages: Array<CoreAssistantMessage | CoreToolMessage>;
+      messages: Array<ResponseMessage>;
     } = {
       id: generateId(),
       timestamp: currentDate(),
@@ -544,6 +573,7 @@ class DefaultStreamTextResult<
 
         if (
           part.type === 'text-delta' ||
+          part.type === 'reasoning' ||
           part.type === 'tool-call' ||
           part.type === 'tool-result' ||
           part.type === 'tool-call-streaming-start' ||
@@ -556,6 +586,11 @@ class DefaultStreamTextResult<
           recordedStepText += part.textDelta;
           recordedContinuationText += part.textDelta;
           recordedFullText += part.textDelta;
+        }
+
+        if (part.type === 'reasoning') {
+          recordedReasoningText =
+            (recordedReasoningText ?? '') + part.textDelta;
         }
 
         if (part.type === 'tool-call') {
@@ -572,6 +607,8 @@ class DefaultStreamTextResult<
             tools: tools ?? ({} as TOOLS),
             toolCalls: recordedToolCalls,
             toolResults: recordedToolResults,
+            messageId: part.messageId,
+            generateMessageId,
           });
 
           // determine the next step type
@@ -599,6 +636,7 @@ class DefaultStreamTextResult<
           const currentStepResult: StepResult<TOOLS> = {
             stepType,
             text: recordedStepText,
+            reasoning: recordedReasoningText,
             toolCalls: recordedToolCalls,
             toolResults: recordedToolResults,
             finishReason: part.finishReason,
@@ -674,6 +712,7 @@ class DefaultStreamTextResult<
 
           // aggregate results:
           self.textPromise.resolve(recordedFullText);
+          self.reasoningPromise.resolve(recordedReasoningText);
           self.stepsPromise.resolve(recordedSteps);
 
           // call onFinish callback:
@@ -682,6 +721,7 @@ class DefaultStreamTextResult<
             logprobs: undefined,
             usage,
             text: recordedFullText,
+            reasoning: recordedReasoningText,
             toolCalls: lastStep.toolCalls,
             toolResults: lastStep.toolResults,
             request: lastStep.request ?? {},
@@ -728,7 +768,7 @@ class DefaultStreamTextResult<
 
     // transform the stream before output parsing
     // to enable replacement of stream segments:
-    if (transform) {
+    for (const transform of transforms) {
       stream = stream.pipeThrough(
         transform({
           tools: tools as TOOLS,
@@ -793,13 +833,15 @@ class DefaultStreamTextResult<
           stepType,
           previousStepText,
           hasLeadingWhitespace,
+          messageId,
         }: {
           currentStep: number;
-          responseMessages: Array<CoreAssistantMessage | CoreToolMessage>;
+          responseMessages: Array<ResponseMessage>;
           usage: LanguageModelUsage;
           stepType: 'initial' | 'continue' | 'tool-result';
           previousStepText: string;
           hasLeadingWhitespace: boolean;
+          messageId: string;
         }) {
           // after the 1st step, we need to switch to messages format:
           const promptFormat =
@@ -912,6 +954,7 @@ class DefaultStreamTextResult<
           let stepProviderMetadata: ProviderMetadata | undefined;
           let stepFirstChunk = true;
           let stepText = '';
+          let stepReasoning = '';
           let fullStepText = stepType === 'continue' ? previousStepText : '';
           let stepLogProbs: LogProbs | undefined;
           let stepResponse: { id: string; timestamp: Date; modelId: string } = {
@@ -948,8 +991,8 @@ class DefaultStreamTextResult<
                 TextStreamPart<TOOLS>
               >({
                 async transform(chunk, controller): Promise<void> {
-                  // Telemetry for first chunk:
                   if (stepFirstChunk) {
+                    // Telemetry for first chunk:
                     const msToFirstChunk = now() - startTimestampMs;
 
                     stepFirstChunk = false;
@@ -960,6 +1003,14 @@ class DefaultStreamTextResult<
 
                     doStreamSpan.setAttributes({
                       'ai.response.msToFirstChunk': msToFirstChunk,
+                    });
+
+                    // Step start:
+                    controller.enqueue({
+                      type: 'step-start',
+                      messageId,
+                      request: stepRequest,
+                      warnings: warnings ?? [],
                     });
                   }
 
@@ -1006,7 +1057,12 @@ class DefaultStreamTextResult<
                       } else {
                         await publishTextChunk({ controller, chunk });
                       }
+                      break;
+                    }
 
+                    case 'reasoning': {
+                      controller.enqueue(chunk);
+                      stepReasoning += chunk.textDelta;
                       break;
                     }
 
@@ -1170,6 +1226,7 @@ class DefaultStreamTextResult<
                     },
                     warnings,
                     isContinued: nextStepType === 'continue',
+                    messageId,
                   });
 
                   const combinedUsage = addLanguageModelUsage(usage, stepUsage);
@@ -1213,6 +1270,8 @@ class DefaultStreamTextResult<
                           tools: tools ?? ({} as TOOLS),
                           toolCalls: stepToolCalls,
                           toolResults: stepToolResults,
+                          messageId,
+                          generateMessageId,
                         }),
                       );
                     }
@@ -1224,6 +1283,11 @@ class DefaultStreamTextResult<
                       stepType: nextStepType,
                       previousStepText: fullStepText,
                       hasLeadingWhitespace: hasWhitespaceSuffix,
+                      messageId:
+                        // keep the same id when continuing a step:
+                        nextStepType === 'continue'
+                          ? messageId
+                          : generateMessageId(),
                     });
                   }
                 },
@@ -1244,6 +1308,7 @@ class DefaultStreamTextResult<
           previousStepText: '',
           stepType: 'initial',
           hasLeadingWhitespace: false,
+          messageId: generateMessageId(),
         });
       },
     }).catch(error => {
@@ -1278,6 +1343,10 @@ class DefaultStreamTextResult<
 
   get text() {
     return this.textPromise.value;
+  }
+
+  get reasoning() {
+    return this.reasoningPromise.value;
   }
 
   get toolCalls() {
@@ -1369,10 +1438,12 @@ However, the LLM results are expected to be small enough to not cause issues.
   private toDataStreamInternal({
     getErrorMessage = () => 'An error occurred.', // mask error messages for safety by default
     sendUsage = true,
+    sendReasoning = false,
   }: {
-    getErrorMessage?: (error: unknown) => string;
-    sendUsage?: boolean;
-  } = {}): ReadableStream<DataStreamString> {
+    getErrorMessage: ((error: unknown) => string) | undefined;
+    sendUsage: boolean | undefined;
+    sendReasoning: boolean | undefined;
+  }): ReadableStream<DataStreamString> {
     let aggregatedResponse = '';
 
     const callbackTransformer = new TransformStream<
@@ -1397,6 +1468,15 @@ However, the LLM results are expected to be small enough to not cause issues.
         switch (chunkType) {
           case 'text-delta': {
             controller.enqueue(formatDataStreamPart('text', chunk.textDelta));
+            break;
+          }
+
+          case 'reasoning': {
+            if (sendReasoning) {
+              controller.enqueue(
+                formatDataStreamPart('reasoning', chunk.textDelta),
+              );
+            }
             break;
           }
 
@@ -1444,6 +1524,15 @@ However, the LLM results are expected to be small enough to not cause issues.
           case 'error': {
             controller.enqueue(
               formatDataStreamPart('error', getErrorMessage(chunk.error)),
+            );
+            break;
+          }
+
+          case 'step-start': {
+            controller.enqueue(
+              formatDataStreamPart('start_step', {
+                messageId: chunk.messageId,
+              }),
             );
             break;
           }
@@ -1501,10 +1590,12 @@ However, the LLM results are expected to be small enough to not cause issues.
       data,
       getErrorMessage,
       sendUsage,
+      sendReasoning,
     }: ResponseInit & {
       data?: StreamData;
       getErrorMessage?: (error: unknown) => string;
-      sendUsage?: boolean; // default to true (change to false in v4: secure by default)
+      sendUsage?: boolean; // default to true (TODO change to false in v5: secure by default)
+      sendReasoning?: boolean; // default to false
     } = {},
   ) {
     writeToServerResponse({
@@ -1515,7 +1606,12 @@ However, the LLM results are expected to be small enough to not cause issues.
         contentType: 'text/plain; charset=utf-8',
         dataStreamVersion: 'v1',
       }),
-      stream: this.toDataStream({ data, getErrorMessage, sendUsage }),
+      stream: this.toDataStream({
+        data,
+        getErrorMessage,
+        sendUsage,
+        sendReasoning,
+      }),
     });
   }
 
@@ -1536,19 +1632,29 @@ However, the LLM results are expected to be small enough to not cause issues.
     data?: StreamData;
     getErrorMessage?: (error: unknown) => string;
     sendUsage?: boolean;
+    sendReasoning?: boolean;
   }) {
     const stream = this.toDataStreamInternal({
       getErrorMessage: options?.getErrorMessage,
       sendUsage: options?.sendUsage,
+      sendReasoning: options?.sendReasoning,
     }).pipeThrough(new TextEncoderStream());
 
     return options?.data ? mergeStreams(options?.data.stream, stream) : stream;
   }
 
-  mergeIntoDataStream(writer: DataStreamWriter) {
+  mergeIntoDataStream(
+    writer: DataStreamWriter,
+    options?: {
+      sendUsage?: boolean;
+      sendReasoning?: boolean;
+    },
+  ) {
     writer.merge(
       this.toDataStreamInternal({
         getErrorMessage: writer.onError,
+        sendUsage: options?.sendUsage,
+        sendReasoning: options?.sendReasoning,
       }),
     );
   }
@@ -1560,13 +1666,15 @@ However, the LLM results are expected to be small enough to not cause issues.
     data,
     getErrorMessage,
     sendUsage,
+    sendReasoning,
   }: ResponseInit & {
     data?: StreamData;
     getErrorMessage?: (error: unknown) => string;
     sendUsage?: boolean;
+    sendReasoning?: boolean;
   } = {}): Response {
     return new Response(
-      this.toDataStream({ data, getErrorMessage, sendUsage }),
+      this.toDataStream({ data, getErrorMessage, sendUsage, sendReasoning }),
       {
         status,
         statusText,

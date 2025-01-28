@@ -1,8 +1,9 @@
 import { z } from 'zod';
-import { CoreTool, tool } from '../tool/tool';
+import { ToolSet } from '../generate-text/tool-set';
+import { Tool, tool } from '../tool/tool';
 import { prepareToolsAndToolChoice } from './prepare-tools-and-tool-choice';
 
-const mockTools: Record<string, CoreTool> = {
+const mockTools: ToolSet = {
   tool1: tool({
     description: 'Tool 1 description',
     parameters: z.object({}),
@@ -13,14 +14,14 @@ const mockTools: Record<string, CoreTool> = {
   }),
 };
 
-const mockProviderDefinedTool: CoreTool = {
+const mockProviderDefinedTool: Tool = {
   type: 'provider-defined',
   id: 'provider.tool-id',
   args: { key: 'value' },
   parameters: z.object({}),
 };
 
-const mockToolsWithProviderDefined: Record<string, CoreTool> = {
+const mockToolsWithProviderDefined: ToolSet = {
   ...mockTools,
   providerTool: mockProviderDefinedTool,
 };
@@ -88,7 +89,7 @@ it('should correctly map tool properties', () => {
     name: 'tool1',
     description: 'Tool 1 description',
     parameters: {
-      $schema: 'https://json-schema.org/draft/2019-09/schema#',
+      $schema: 'http://json-schema.org/draft-07/schema#',
       additionalProperties: false,
       type: 'object',
       properties: {},

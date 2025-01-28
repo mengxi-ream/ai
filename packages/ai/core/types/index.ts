@@ -3,6 +3,7 @@ export type {
   ImageModel,
   ImageGenerationWarning as ImageModelCallWarning,
 } from './image-model';
+export type { ImageModelResponseMetadata } from './image-model-response-metadata';
 export type {
   CallWarning,
   CoreToolChoice,
@@ -13,6 +14,7 @@ export type {
   LanguageModelV1Prompt,
   LanguageModelV1StreamPart,
   LogProbs,
+  ToolChoice,
 } from './language-model';
 export type { LanguageModelRequestMetadata } from './language-model-request-metadata';
 export type { LanguageModelResponseMetadata } from './language-model-response-metadata';

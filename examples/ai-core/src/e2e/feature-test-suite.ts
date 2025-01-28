@@ -77,6 +77,7 @@ export interface ModelVariants {
   invalidModel?: LanguageModelV1;
   languageModels?: ModelWithCapabilities<LanguageModelV1>[];
   embeddingModels?: ModelWithCapabilities<EmbeddingModelV1<string>>[];
+  invalidImageModel?: ImageModelV1;
   imageModels?: ModelWithCapabilities<ImageModelV1>[];
 }
 
@@ -315,24 +316,6 @@ export function createFeatureTestSuite({
                 expect(result.object.items).toHaveLength(3);
                 expect(result.object.items[0].name).toBeTruthy();
                 expect(typeof result.object.items[0].quantity).toBe('number');
-              });
-
-              it('should generate object with complex fields', async () => {
-                const result = await generateObject({
-                  model,
-                  schema: z.object({
-                    title: z.string(),
-                    description: z.string(),
-                    price: z.number().min(0),
-                    isAvailable: z.boolean(),
-                  }),
-                  prompt: 'Generate details for a product listing.',
-                });
-
-                expect(result.object.title).toBeTruthy();
-                expect(result.object.description.length).toBeGreaterThan(10);
-                expect(result.object.price).toBeGreaterThan(0);
-                expect(typeof result.object.isAvailable).toBe('boolean');
               });
 
               it('should generate nested objects', async () => {
@@ -592,6 +575,8 @@ export function createFeatureTestSuite({
 
                   const result = await generateObject({
                     model,
+                    schemaName: 'product',
+                    schemaDescription: 'A product listing',
                     schema: ProductSchema,
                     messages: [
                       {
@@ -651,16 +636,20 @@ export function createFeatureTestSuite({
               });
 
               it('should stream text with tool calls', async () => {
+                let toolCallCount = 0;
                 const result = streamText({
                   model,
-                  prompt: 'Calculate 5+7 and 3*4 using the calculator tool.',
+                  prompt:
+                    'What is 2+2? Use the calculator tool to compute this.',
                   tools: {
                     calculator: {
                       parameters: z.object({
                         expression: z.string(),
                       }),
-                      execute: async ({ expression }) =>
-                        eval(expression).toString(),
+                      execute: async ({ expression }) => {
+                        toolCallCount++;
+                        return eval(expression).toString();
+                      },
                     },
                   },
                 });
@@ -673,6 +662,7 @@ export function createFeatureTestSuite({
                 expect(parts.some(part => part.type === 'tool-call')).toBe(
                   true,
                 );
+                expect(toolCallCount).toBe(1);
                 if (!customAssertions.skipUsage) {
                   expect((await result.usage).totalTokens).toBeGreaterThan(0);
                 }
@@ -1024,6 +1014,24 @@ export function createFeatureTestSuite({
 
               // If we reach here, the test should fail
               expect(true).toBe(false); // Force test to fail if no error is thrown
+            } catch (error) {
+              expect(error).toBeInstanceOf(APICallError);
+              errorValidator(error as APICallError);
+            }
+          });
+        });
+      }
+
+      if (models.invalidImageModel) {
+        describe('Image Model Error Handling:', () => {
+          const invalidModel = models.invalidImageModel!;
+
+          it('should throw error on generate image attempt with invalid model ID', async () => {
+            try {
+              await generateImage({
+                model: invalidModel,
+                prompt: 'This should fail',
+              });
             } catch (error) {
               expect(error).toBeInstanceOf(APICallError);
               errorValidator(error as APICallError);

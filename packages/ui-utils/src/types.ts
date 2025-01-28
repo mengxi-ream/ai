@@ -1,9 +1,5 @@
 import { LanguageModelV1FinishReason } from '@ai-sdk/provider';
-import {
-  ToolCall as CoreToolCall,
-  ToolResult as CoreToolResult,
-  FetchFunction,
-} from '@ai-sdk/provider-utils';
+import { ToolCall, ToolResult, FetchFunction } from '@ai-sdk/provider-utils';
 import { LanguageModelUsage } from './duplicated/usage';
 
 export * from './use-assistant-types';
@@ -16,9 +12,9 @@ there is one tool invocation. While the call is in progress, the invocation is a
 Once the call is complete, the invocation is a tool result.
  */
 export type ToolInvocation =
-  | ({ state: 'partial-call' } & CoreToolCall<string, any>)
-  | ({ state: 'call' } & CoreToolCall<string, any>)
-  | ({ state: 'result' } & CoreToolResult<string, any, any>);
+  | ({ state: 'partial-call' } & ToolCall<string, any>)
+  | ({ state: 'call' } & ToolCall<string, any>)
+  | ({ state: 'result' } & ToolResult<string, any, any>);
 
 /**
  * An attachment that can be sent along with a message.
@@ -59,6 +55,11 @@ The timestamp of the message.
 Text content of the message.
    */
   content: string;
+
+  /**
+Reasoning for the message.
+   */
+  reasoning?: string;
 
   /**
    * Additional attachments to be sent along with the message.
@@ -188,7 +189,7 @@ either synchronously or asynchronously.
   onToolCall?: ({
     toolCall,
   }: {
-    toolCall: CoreToolCall<string, unknown>;
+    toolCall: ToolCall<string, unknown>;
   }) => void | Promise<unknown> | unknown;
 
   /**
@@ -217,7 +218,7 @@ either synchronously or asynchronously.
   onError?: (error: Error) => void;
 
   /**
-   * A way to provide a function that is going to be used for ids for messages.
+   * A way to provide a function that is going to be used for ids for messages and the chat.
    * If not provided the default AI SDK `generateId` is used.
    */
   generateId?: IdGenerator;

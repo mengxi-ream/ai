@@ -8,32 +8,37 @@ import {
 } from '@ai-sdk/provider-utils';
 import { z } from 'zod';
 import { googleVertexFailedResponseHandler } from './google-vertex-error';
-
-export type GoogleVertexImageModelId =
-  | 'imagen-3.0-generate-001'
-  | 'imagen-3.0-fast-generate-001'
-  | (string & {});
+import {
+  GoogleVertexImageModelId,
+  GoogleVertexImageSettings,
+} from './google-vertex-image-settings';
 
 interface GoogleVertexImageModelConfig {
   provider: string;
   baseURL: string;
   headers?: Resolvable<Record<string, string | undefined>>;
   fetch?: typeof fetch;
+  _internal?: {
+    currentDate?: () => Date;
+  };
 }
 
 // https://cloud.google.com/vertex-ai/generative-ai/docs/image/generate-images
 export class GoogleVertexImageModel implements ImageModelV1 {
   readonly specificationVersion = 'v1';
 
-  // https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/imagen-api#parameter_list
-  readonly maxImagesPerCall = 4;
-
   get provider(): string {
     return this.config.provider;
   }
 
+  get maxImagesPerCall(): number {
+    // https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/imagen-api#parameter_list
+    return this.settings.maxImagesPerCall ?? 4;
+  }
+
   constructor(
     readonly modelId: GoogleVertexImageModelId,
+    readonly settings: GoogleVertexImageSettings,
     private config: GoogleVertexImageModelConfig,
   ) {}
 
@@ -70,7 +75,8 @@ export class GoogleVertexImageModel implements ImageModelV1 {
       },
     };
 
-    const { value: response } = await postJsonToApi({
+    const currentDate = this.config._internal?.currentDate?.() ?? new Date();
+    const { value: response, responseHeaders } = await postJsonToApi({
       url: `${this.config.baseURL}/models/${this.modelId}:predict`,
       headers: combineHeaders(await resolve(this.config.headers), headers),
       body,
@@ -83,10 +89,16 @@ export class GoogleVertexImageModel implements ImageModelV1 {
     });
 
     return {
-      images: response.predictions.map(
-        (p: { bytesBase64Encoded: string }) => p.bytesBase64Encoded,
-      ),
+      images:
+        response.predictions?.map(
+          (p: { bytesBase64Encoded: string }) => p.bytesBase64Encoded,
+        ) ?? [],
       warnings,
+      response: {
+        timestamp: currentDate,
+        modelId: this.modelId,
+        headers: responseHeaders,
+      },
     };
   }
 }
@@ -94,5 +106,5 @@ export class GoogleVertexImageModel implements ImageModelV1 {
 // minimal version of the schema, focussed on what is needed for the implementation
 // this approach limits breakages when the API changes and increases efficiency
 const vertexImageResponseSchema = z.object({
-  predictions: z.array(z.object({ bytesBase64Encoded: z.string() })),
+  predictions: z.array(z.object({ bytesBase64Encoded: z.string() })).nullish(),
 });

@@ -7,7 +7,6 @@ import { assembleOperationName } from '../telemetry/assemble-operation-name';
 import { recordSpan } from '../telemetry/record-span';
 import { selectTelemetryAttributes } from '../telemetry/select-telemetry-attributes';
 import { TelemetrySettings } from '../telemetry/telemetry-settings';
-import { CoreTool } from '../tool';
 import {
   FinishReason,
   LanguageModelUsage,
@@ -19,12 +18,15 @@ import { parseToolCall } from './parse-tool-call';
 import { ToolCallUnion } from './tool-call';
 import { ToolCallRepairFunction } from './tool-call-repair';
 import { ToolResultUnion } from './tool-result';
+import { ToolSet } from './tool-set';
 
-export type SingleRequestTextStreamPart<
-  TOOLS extends Record<string, CoreTool>,
-> =
+export type SingleRequestTextStreamPart<TOOLS extends ToolSet> =
   | {
       type: 'text-delta';
+      textDelta: string;
+    }
+  | {
+      type: 'reasoning';
       textDelta: string;
     }
   | ({
@@ -62,7 +64,7 @@ export type SingleRequestTextStreamPart<
       error: unknown;
     };
 
-export function runToolsTransformation<TOOLS extends Record<string, CoreTool>>({
+export function runToolsTransformation<TOOLS extends ToolSet>({
   tools,
   generatorStream,
   toolCallStreaming,
@@ -136,6 +138,7 @@ export function runToolsTransformation<TOOLS extends Record<string, CoreTool>>({
       switch (chunkType) {
         // forward:
         case 'text-delta':
+        case 'reasoning':
         case 'response-metadata':
         case 'error': {
           controller.enqueue(chunk);
